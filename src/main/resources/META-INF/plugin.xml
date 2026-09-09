@@ -1,0 +1,16 @@
+<idea-plugin>
+    <id>dev.inlinefim</id>
+    <name>Inline FIM</name>
+    <vendor>shivani-bokka</vendor>
+    <description><![CDATA[
+        <p>Local fill-in-the-middle code completion, rendered inline as you type.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <inline.completion.provider
+            id="dev.inlinefim.InlineFimProvider"
+            implementationClass="dev.inlinefim.InlineFimProvider"/>
+    </extensions>
+</idea-plugin>
