@@ -237,6 +237,85 @@ is not model speed — the smaller model is worse at knowing when to stop, so it
 generates more tokens before hitting one. Total time conflates speed with
 verbosity. TTFT separates them, and does so monotonically with size.
 
+### Why not a bigger model
+
+The obvious objection to a 1.5B model is that 70B models exist and are better at
+code. They are. They are also unusable here, for a reason worth spelling out.
+
+Generating a token requires reading every active weight out of memory, once. So
+generation speed is bounded by **memory bandwidth**, not by compute:
+
+```
+tokens/sec  ~=  effective bandwidth (GB/s)  /  model size (GB)
+```
+
+If that is really the binding constraint, then `tok/s x size` should come out
+roughly constant across model sizes on the same machine. `bench/throughput.py`
+checks that. Measured on an RTX 4060 Laptop (8 GB VRAM), 12 caret positions per
+model, token counts and durations taken from Ollama's own `eval_count` /
+`eval_duration` rather than from wall-clock and a chars-per-token guess:
+
+| model | weights | generation | tok/s x GB |
+|---|---|---|---|
+| 0.5B base | 0.53 GB | 182 tok/s | 96 GB/s |
+| 1.5B base | 0.99 GB | 93 tok/s | 92 GB/s |
+| 3B base | 1.90 GB | 63 tok/s | 119 GB/s |
+
+The product holds across a 3.6x range of model sizes. Generation here is
+bandwidth-bound at roughly **100 GB/s effective**, and model size buys latency
+at a fixed, predictable exchange rate.
+
+Four runs of that script gave 107, 103, 95 and 102 GB/s -- about 10% spread,
+from thermal throttling on a laptop GPU and contention with whatever else is
+running. The conclusion below is two orders of magnitude away from the budget,
+so it does not depend on that precision.
+
+Which lets the 70B case be arithmetic on a measured constant rather than a
+guess. A 70B model at 4-bit is about **40 GB of weights**. That does not fit in
+8 GB of VRAM, so it would spill to system memory and run on the CPU, slower
+still. But even granting it the full GPU bandwidth measured above:
+
+```
+100 GB/s / 40 GB  ~=  2.5 tokens/sec
+```
+
+A typical completion here is around 30 tokens. That is **12 seconds**, against a
+300ms budget, and it is the optimistic figure. The line would be finished, and
+so would the next one.
+
+That last step is arithmetic, not a measurement, and the README should say so
+plainly: no 70B model was run here, because none fits. What was measured is the
+constant it rests on.
+
+This is not a claim that 70B models cannot do autocomplete. It is a claim about
+where they have to run. An H100 has ~3350 GB/s and 80 GB of VRAM, so 40 GB of
+weights fit and the same arithmetic gives ~84 tok/s -- comfortable. That is what
+hosted completion products are doing. It also means a network round trip, an API
+key, and the file leaving the machine, which are the three things this project
+was built to avoid.
+
+### The more interesting reason
+
+Bandwidth is the hard limit, but it is not the only argument, and on its own it
+would just be a story about hardware.
+
+Look again at the quality curve above. 0.5B to 1.5B buys 10 points of exact
+match. 1.5B to 3B buys 2.6. The returns are already flattening hard, at 3B, on a
+curve that has 70B somewhere far off the right-hand edge.
+
+That is not an accident of this eval. Autocomplete is mostly a local, syntactic
+task: close the bracket, finish the call, match the naming convention from two
+lines up, respect the indentation. Almost everything needed to do it well is in
+the few thousand characters already in the prompt. What a much larger model
+brings is world knowledge and multi-step reasoning, and this task leans on
+neither. Scale is being spent on capability the problem does not use.
+
+So the honest summary is that the binding constraint is latency, the quality gap
+to a much larger model is narrower here than it would be on a reasoning task,
+and the gap that does remain is better closed with task-specific training data
+than with parameters. Which is the argument for collecting the accept/reject
+signal in the first place -- see [telemetry](#telemetry-and-what-it-has-not-yet-told-us).
+
 ---
 
 ## Completion quality
