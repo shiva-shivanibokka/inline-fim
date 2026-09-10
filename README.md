@@ -19,6 +19,41 @@ Built against IntelliJ IDEA Community 2025.2.6.2 from the
 
 ---
 
+## Four things worth a reviewer's time
+
+Each is documented in full below, with the run that produced it.
+
+- **A latency bug that manual testing could not see.** Typing in the sandbox,
+  completions felt "slightly slow". Measured, they were 2194ms against a 300ms
+  budget, and the cause was not the model: `localhost` resolves to IPv6 first on
+  Windows, Ollama binds IPv4 only, and every connection paid ~2s failing over.
+  One word, 36x — [details](#the-two-seconds-that-were-not-the-models-fault).
+
+- **A quality bug that reading the code could not see.** The offline eval caught
+  the model emitting a raw `<|cursor|>` token into completions
+  (`want: 'er {'`, `got: 'er() {<|cursor|>'`). It had been in every build until
+  something compared output against ground truth —
+  [details](#completion-quality).
+
+- **A test that was rewritten because it could not fail.** The first
+  cancellation test waited 250ms against a 1000ms stream, so an implementation
+  that ignored cancellation entirely would also have passed. That is decoration,
+  not a test. It now waits past the full stream duration, and was verified by
+  mutation: delete the one line that closes the socket, watch it go red —
+  [details](#tests).
+
+- **A README that says "not measured" where nothing was measured.** Human accept
+  rate is the number this project would most like to report, and the one number
+  here that is not real. The pipeline is built and verified; the figure needs a
+  human using the plugin. It is left blank rather than filled in —
+  [details](#telemetry-and-what-it-has-not-yet-told-us).
+
+Three of those four are things that neither reading the code nor using the
+plugin would have surfaced. They came from measurement. The fourth is what the
+same discipline costs when the measurement is not available.
+
+---
+
 ## Running it
 
 **Requires** JDK 21, and [Ollama](https://ollama.com) with a FIM-capable model:
