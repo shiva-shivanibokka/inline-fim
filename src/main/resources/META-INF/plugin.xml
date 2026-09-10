@@ -4,6 +4,9 @@
     <vendor>shivani-bokka</vendor>
     <description><![CDATA[
         <p>Local fill-in-the-middle code completion, rendered inline as you type.</p>
+        <p>Sends the code before and after your caret to a FIM-trained model running
+        locally under Ollama, and offers the middle. No API key, no network, no
+        code leaving the machine.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -12,5 +15,17 @@
         <inline.completion.provider
             id="dev.inlinefim.InlineFimProvider"
             implementationClass="dev.inlinefim.InlineFimProvider"/>
+
+        <applicationConfigurable
+            parentId="tools"
+            id="dev.inlinefim.settings"
+            displayName="Inline FIM"
+            instance="dev.inlinefim.FimConfigurable"/>
     </extensions>
+
+    <applicationListeners>
+        <listener
+            class="dev.inlinefim.TelemetryInstaller"
+            topic="com.intellij.codeInsight.inline.completion.InlineCompletionInstallListener"/>
+    </applicationListeners>
 </idea-plugin>
