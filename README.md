@@ -67,7 +67,13 @@ Then:
 ```bash
 ./gradlew runIde        # opens a sandbox IDE with the plugin loaded
 ./gradlew test          # 23 tests, no Ollama needed
+./gradlew buildPlugin   # -> build/distributions/inline-fim-0.1.0.zip
 ```
+
+On Windows, close the sandbox IDE before running `buildPlugin`. `prepareSandbox`
+rewrites the sandbox plugin directory, and a running IDE holds memory-mapped
+handles on the jars in it, which fails as *"cannot be performed on a file with a
+user-mapped section open"*. It is a file lock, not a build problem.
 
 Settings live at **Settings → Tools → Inline FIM** — model, token and line caps,
 debounce, and every silence rule as an individual toggle.
