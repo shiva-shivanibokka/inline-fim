@@ -3,12 +3,19 @@ package dev.inlinefim
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.future.await
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.Collections
 
 // ---------------------------------------------------------------------------
 // Context assembly
@@ -34,8 +41,8 @@ private const val SUFFIX_CHARS = 1000
 
 /**
  * `data class` generates equals/hashCode/toString/copy from the constructor
- * properties -- roughly Python's @dataclass. The generated equals() is what
- * makes this usable as a cache key later.
+ * properties -- roughly Python's @dataclass. The generated equals() is exactly
+ * what makes this usable as a cache key below.
  */
 data class FimContext(val prefix: String, val suffix: String)
 
@@ -84,10 +91,39 @@ private val STOP_TOKENS = listOf(
 )
 
 // ---------------------------------------------------------------------------
+// Cache
+// ---------------------------------------------------------------------------
+//
+// Identical context must not re-query the model. This happens constantly in
+// practice: undo, Esc-then-retype, arrow away and back, or the platform simply
+// re-firing for a caret position we have already answered for.
+//
+// LinkedHashMap with accessOrder=true IS an LRU cache -- removeEldestEntry is
+// the eviction hook. No cache library, no dependency.
+
+private const val CACHE_ENTRIES = 256
+
+private val cache: MutableMap<FimContext, String> = Collections.synchronizedMap(
+    object : LinkedHashMap<FimContext, String>(CACHE_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: Map.Entry<FimContext, String>): Boolean = size > CACHE_ENTRIES
+    }
+)
+
+fun cachedCompletion(ctx: FimContext): String? = cache[ctx]
+
+fun cacheCompletion(ctx: FimContext, text: String) {
+    cache[ctx] = text
+}
+
+// ---------------------------------------------------------------------------
 // Ollama client
 // ---------------------------------------------------------------------------
 
 const val DEFAULT_MODEL = "qwen2.5-coder:1.5b-base"
+// 127.0.0.1, deliberately NOT localhost. On Windows `localhost` resolves to ::1
+// first, Ollama binds IPv4 only, and every new connection eats ~2s failing over.
+// Measured: 2428ms wall vs 101ms for an identical request. See bench/latency.py.
+const val OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 
 /**
  * `object` is a singleton -- Kotlin's built-in equivalent of a module-level
@@ -100,45 +136,65 @@ object OllamaFim {
         .connectTimeout(Duration.ofSeconds(2))
         .build()
 
-    /** The last prompt actually sent, so we can eyeball it without a debugger. */
+    /** The last prompt actually sent, so it can be eyeballed without a debugger. */
     @Volatile
     var lastPrompt: String = ""
         private set
 
     /**
-     * Returns the model's completion, or "" if it had nothing / the call failed.
+     * Streams the completion, one chunk per token.
      *
-     * `suspend` matters here: the caller is cancelled the moment the user types
-     * again, and because we await a CompletableFuture rather than blocking a
-     * thread, that cancellation actually aborts the HTTP exchange instead of
-     * leaving it running to deliver a result nobody wants.
+     * Streaming is what separates time-to-first-token from total time. With a
+     * single blocking call the user waits for the last token before seeing the
+     * first; here text appears as soon as the model produces it, which is the
+     * number the latency budget is actually about.
      */
-    suspend fun complete(prompt: String, model: String = DEFAULT_MODEL, maxTokens: Int = 128): String {
+    fun stream(prompt: String, model: String = DEFAULT_MODEL, maxTokens: Int = 128): Flow<String> = flow {
         lastPrompt = prompt
 
         val options = JsonObject().apply {
-            addProperty("temperature", 0.2)     // near-greedy; autocomplete wants the likely token, not a creative one
+            addProperty("temperature", 0.2)   // near-greedy; autocomplete wants the likely token, not a creative one
             addProperty("num_predict", maxTokens)
             add("stop", JsonArray().apply { STOP_TOKENS.forEach { add(it) } })
         }
         val payload = JsonObject().apply {
             addProperty("model", model)
             addProperty("prompt", prompt)
-            addProperty("raw", true)           // bypass Ollama's chat template -- see fimPrompt above
-            addProperty("stream", false)       // streaming lands in Step 3, where TTFT is the metric
-            addProperty("keep_alive", "30m")   // keeps weights resident; a cold load costs ~4.5s
+            addProperty("raw", true)          // bypass the chat template -- see fimPrompt above
+            addProperty("stream", true)
+            addProperty("keep_alive", "30m")  // keeps weights resident; a cold load costs ~4.5s
             add("options", options)
         }
 
-        val req = HttpRequest.newBuilder(URI.create("http://localhost:11434/api/generate"))
+        val req = HttpRequest.newBuilder(URI.create(OLLAMA_URL))
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
             .build()
 
-        val resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofString()).await()
-        if (resp.statusCode() != 200) return ""
-        return JsonParser.parseString(resp.body()).asJsonObject
-            .get("response")?.asString.orEmpty()
-    }
+        // ofLines() completes as soon as the response headers land, then yields
+        // body lines lazily as they arrive. That laziness is what gives us a real
+        // first-token moment instead of one lump at the end.
+        val resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofLines()).await()
+        if (resp.statusCode() != 200) return@flow
+
+        val lines = resp.body()
+        try {
+            val iter = lines.iterator()
+            // ponytail: hasNext() blocks between tokens, so cancellation lands on
+            // the next token boundary rather than instantly. At ~15ms/token that is
+            // invisible, and the 10s request timeout bounds the worst case. Switch
+            // to BodyHandlers.ofPublisher if it ever stops being invisible.
+            while (iter.hasNext()) {
+                currentCoroutineContext().ensureActive()
+                val line = iter.next()
+                if (line.isBlank()) continue
+                val obj = JsonParser.parseString(line).asJsonObject
+                obj.get("response")?.asString?.takeIf { it.isNotEmpty() }?.let { emit(it) }
+                if (obj.get("done")?.asBoolean == true) break
+            }
+        } finally {
+            lines.close()
+        }
+    }.flowOn(Dispatchers.IO)
 }
