@@ -16,6 +16,10 @@
             id="dev.inlinefim.InlineFimProvider"
             implementationClass="dev.inlinefim.InlineFimProvider"/>
 
+        <!-- Pays the ~4.5s cold model load at startup rather than on the user's
+             first keystroke. Failure is silent and harmless. -->
+        <postStartupActivity implementation="dev.inlinefim.FimWarmup"/>
+
         <applicationConfigurable
             parentId="tools"
             id="dev.inlinefim.settings"

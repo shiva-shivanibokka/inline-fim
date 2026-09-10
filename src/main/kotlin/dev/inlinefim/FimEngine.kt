@@ -149,7 +149,12 @@ object OllamaFim {
      * first; here text appears as soon as the model produces it, which is the
      * number the latency budget is actually about.
      */
-    fun stream(prompt: String, model: String = DEFAULT_MODEL, maxTokens: Int = 128): Flow<String> = flow {
+    fun stream(
+        prompt: String,
+        model: String = DEFAULT_MODEL,
+        maxTokens: Int = 128,
+        url: String = OLLAMA_URL,   // injectable so the cancellation test can point at a stub server
+    ): Flow<String> = flow {
         lastPrompt = prompt
 
         val options = JsonObject().apply {
@@ -166,7 +171,7 @@ object OllamaFim {
             add("options", options)
         }
 
-        val req = HttpRequest.newBuilder(URI.create(OLLAMA_URL))
+        val req = HttpRequest.newBuilder(URI.create(url))
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
@@ -194,6 +199,8 @@ object OllamaFim {
                 if (obj.get("done")?.asBoolean == true) break
             }
         } finally {
+            // Closing here is what actually aborts the socket on cancellation.
+            // CancellationTest fails if this line is removed -- verified, not assumed.
             lines.close()
         }
     }.flowOn(Dispatchers.IO)
