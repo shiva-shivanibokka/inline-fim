@@ -37,6 +37,7 @@ SUFFIX_CHARS = 1000
 STOP_TOKENS = [
     "<|endoftext|>", "<|fim_pad|>", "<|file_sep|>", "<|repo_name|>",
     "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+    "<|cursor|>", "<|im_start|>", "<|im_end|>",
 ]
 
 

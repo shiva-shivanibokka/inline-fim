@@ -88,6 +88,11 @@ fun fimPrompt(ctx: FimContext): String =
 private val STOP_TOKENS = listOf(
     "<|endoftext|>", "<|fim_pad|>", "<|file_sep|>", "<|repo_name|>",
     "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+    // <|cursor|> and the chat markers are also in Qwen2.5-Coder's vocabulary and
+    // do leak out. bench/offline_eval.py caught this one in the wild:
+    //   want: 'er {'   got: 'er() {<|cursor|>'
+    // Without the stop it renders as literal garbage in the editor.
+    "<|cursor|>", "<|im_start|>", "<|im_end|>",
 )
 
 // ---------------------------------------------------------------------------
