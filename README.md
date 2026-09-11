@@ -71,7 +71,7 @@ Then:
 
 ```bash
 ./gradlew runIde        # opens a sandbox IDE with the plugin loaded
-./gradlew test          # 23 tests, no Ollama needed
+./gradlew test          # 24 tests, no Ollama needed
 ./gradlew buildPlugin   # -> build/distributions/inline-fim-0.1.0.zip
 ```
 
@@ -132,7 +132,8 @@ IntelliJ InlineCompletionProvider          (the platform calls us)
   └─ telemetry                             one JSON record per suggestion
 ```
 
-Six source files, 857 lines including the commentary, plus 328 lines of tests.
+Six source files, 917 lines including the commentary, plus 396 lines of tests
+and 671 lines of measurement harness.
 
 **No third-party runtime dependencies.** `HttpClient` is JDK 21; Gson and
 `kotlinx-coroutines-future` already ship inside the IntelliJ platform (both in
@@ -529,58 +530,112 @@ distinction yet.
 
 ## Tests
 
-23, all runnable offline without Ollama.
+24, all runnable offline without Ollama.
 
-The cancellation test deserves a note, because the first version of it was
-worthless. Cancellation is easy to claim and easy to break silently — a blocking
-`send()` inside a coroutine, or a bare `catch (e: Exception)` swallowing
-`CancellationException`, both leave code that looks correct while requests run on
-to deliver results nobody wants. Neither throws anything.
+Two of them are about cancellation, and the history of those two is the most
+useful thing in this section.
 
-So the test watches from the server side: a stub `HttpServer` streams 40 tokens at
-25ms intervals, the collector is cancelled after three, and the test waits
-**longer than the entire stream would have taken** before checking the server
-never finished. That last part is the whole test — my first draft waited 250ms
-against a 1000ms stream, which a completely broken implementation would also have
-passed.
+**The first version was worthless.** Cancellation is easy to claim and easy to
+break silently -- a blocking `send()` inside a coroutine, or a bare
+`catch (e: Exception)` swallowing `CancellationException`, both leave code that
+looks correct while requests run on to deliver results nobody wants. Neither
+throws anything. So the test watches from the server side: a stub `HttpServer`
+streams 40 tokens at 25ms intervals, the collector is cancelled after three, and
+the test waits **longer than the entire stream would have taken** before checking
+that the server never finished. That last part is the whole test. My first draft
+waited 250ms against a 1000ms stream, which a completely broken implementation
+would also have passed.
 
-Verified by mutation: deleting the `lines.close()` that does the aborting makes it
-fail, and the negative control still passes.
+**Then the fixed version turned out to be too weak as well**, and only real
+telemetry showed it. Streaming a token every 25ms means "aborts within one token"
+and "aborts immediately" are indistinguishable -- and the difference between them
+was, in production, the difference between 481ms and 7.2 seconds. The test passed
+throughout.
+
+So the second test reproduces what a queued server actually looks like: two quick
+tokens, then a five-second stall, and cancellation must return in under a fifth
+of that. It fails against the old implementation and passes against the new one.
+
+Both were verified by mutation rather than by inspection. Setting
+`onCancelling = false` makes the second fail; restoring it makes it pass.
+Deleting the `body.close()` that does the aborting makes the first fail. The
+negative control -- a stream that completes normally must not report itself as
+cancelled -- passes in every case, so neither test is passing because the stub is
+simply broken.
+
+The lesson I would keep: a test that cannot fail is not a weak test, it is
+decoration, and both of these looked completely reasonable while proving nothing.
 
 ---
 
 ## What I would do next
 
-**Measure the accept rate.** Everything is in place; it needs use.
+In the order I would actually do them.
 
-**Tune the context window against the eval.** 3000/1000 is reasoned, not
-optimised. The harness to sweep it exists — I simply have no evidence yet that
-it's the bottleneck, and tuning it on a hunch is the mistake this project has
-otherwise avoided.
+**Measure retention, not just acceptance.** A range marker over the inserted text
+plus a document listener, sampling how much of it survives a minute later. This is
+first because it is the cheapest change that would make the accept rate mean
+something, and because for finetuning it is the more honest label.
+
+**Get it in front of someone who did not write it.** Every number here was
+produced by the author. That is the confound no additional sampling by me can
+remove.
+
+**Explain the last three stalls.** They are no longer a cascade, but "two
+overlapping requests" is a description. The suspect is the debounce firing a new
+request before the previous one has finished tearing down; the telemetry needed
+is a request id and a start timestamp, which is a few lines.
+
+**Tune the context window and the line cap against the eval.** 3000/1000 and four
+lines are reasoned, not optimised. The harness to sweep them exists. Tuning them
+on a hunch is the mistake this project has otherwise avoided, and the eval is
+cheap enough to answer both properly.
+
+**An uncontaminated eval corpus.** Repositories published after the model's
+training cutoff, so the Python number means what it appears to mean.
 
 **Cross-file context.** Qwen2.5-Coder has `<|repo_name|>` and `<|file_sep|>`
 tokens for repo-level FIM, so other open tabs could be fed in properly rather than
-concatenated. Deliberately not built: it's speculative until the eval shows local
-context is what's limiting quality.
+concatenated. Deliberately not built: speculative until the eval shows local
+context is what limits quality.
 
-**Revisit streaming.** Step 3 streamed tokens as they arrived; Step 4 reverted to
-collecting the whole completion first, because trimming to a line budget and
-detecting an echo are judgements about the *whole* suggestion and rendered text
-can't be retracted. At p50 210ms that trade is fine. If the model gets bigger, the
-answer is to stream the first line and decide about the rest.
+**Stream the first line.** The whole completion is collected before anything is
+shown, because trimming to a line budget and detecting an echo are judgements
+about the whole suggestion and rendered text cannot be retracted. That costs the
+difference between 62ms and 461ms at p50. Showing the first line as soon as it
+completes, and the rest once judged, would recover most of it.
 
 ### What is weak
 
-- **Accept rate is unmeasured.** The headline gap.
-- **The 4-line cap is a guess.** Well-motivated by the logs, but I haven't tested
-  4 against 2 or 8. The telemetry could answer it.
+Ordered by how much they should change your reading of the numbers above.
+
+- **One user, who is also the author.** This is the single biggest weakness in
+  the project and no amount of extra sampling from me would fix it. I know what
+  the model is good at, and I cannot un-know it while typing; every session is
+  measured by someone with an interest in the result. A second person for ten
+  minutes would be worth more than tripling my own sample, and I did not have
+  one. Read every accept rate here with that attached.
+- **Small n.** 12, 27 and 25 suggestions per session; 80 and 120 eval cases.
+  Enough to catch a 5x latency regression, nowhere near enough to separate a 55%
+  accept rate from a 64% one.
+- **Acceptance, not retention.** Accepting a suggestion and then deleting half
+  of it still counts as a full accept. See above for what it would take to fix.
+- **Total p50 is 461ms in real use, against a 300ms goal.** Time to first token
+  is well inside budget at 62ms, but nothing renders until the whole suggestion
+  is in, so the number that matters is still over.
+- **Three stalls per session are unexplained.** They are no longer the cascade
+  that a queue caused -- Ollama's log shows two requests overlapping rather than
+  a pile-up -- but "two overlapping requests" is a description, not a diagnosis.
+- **The Python eval is contaminated** and cannot say by how much.
+- **The 4-line cap is a guess.** Well-motivated by the logs, but 4 was never
+  tested against 2 or 8. The telemetry could answer it and has not been asked.
 - **String detection is a heuristic**, not a real language strategy.
-- **Single-machine numbers.** Everything here is one GPU laptop. The context-window
+- **Single-machine numbers.** One GPU laptop throughout. The context-window
   reasoning would change materially on CPU-only hardware.
-- **Cancellation lands on a token boundary**, not instantly, because the NDJSON
-  reader blocks between lines. At ~15ms per token that's invisible; the upgrade
-  path is `BodyHandlers.ofPublisher` and it's noted in the code.
-- **No manual-trigger shortcut.** The platform supports `ManualCall`; not wired up.
+- **No manual-trigger shortcut.** The platform supports `ManualCall`; not wired.
+- **`verifyPlugin` has never been run to completion** here -- it times out
+  downloading an IDE to verify against. `buildPlugin` and
+  `verifyPluginProjectConfiguration` both pass.
 
 ---
 
