@@ -10,6 +10,7 @@ import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionSug
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.diagnostic.thisLogger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.takeWhile
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -93,18 +94,33 @@ class InlineFimProvider : DebouncedInlineCompletionProvider() {
         // cannot un-show text you have already rendered. Showing a wall of code
         // and retracting it is worse than waiting 200ms more for a good one.
         //
-        // p50 total is ~210ms, which is inside the budget anyway. If the model
-        // gets bigger and total time climbs, revisit: stream the first line, then
-        // decide about the rest.
+        // Because nothing shows until the last token, the number the user feels
+        // is total, not TTFT. The bench said p50 total 210ms and this comment
+        // used to call that "inside the budget anyway". Real editing telemetry
+        // said 1567ms, because the bench let the model stop early and real use
+        // did not: 83% of suggestions hit the line cap. We were paying for 128
+        // tokens and showing four lines of them.
+        //
+        // So stop reading as soon as no further token could change what is
+        // displayed. takeWhile cancels the upstream flow, which closes the
+        // response body, which aborts the request -- the model stops generating
+        // rather than finishing into a buffer nobody reads.
         val started = System.nanoTime()
         var ttftMs = -1L
         val full = StringBuilder()
+        var newlines = 0
 
         try {
-            OllamaFim.stream(fimPrompt(ctx), settings.model, settings.maxTokens).collect { chunk ->
-                if (ttftMs < 0) ttftMs = (System.nanoTime() - started) / 1_000_000
-                full.append(chunk)
-            }
+            OllamaFim.stream(fimPrompt(ctx), settings.model, settings.maxTokens)
+                // trimSuggestion keeps at most maxLines lines and may stop sooner
+                // on a dedent, so maxLines newlines is a hard upper bound on what
+                // could ever be shown. Everything after it is waste by construction.
+                .takeWhile { newlines < settings.maxLines }
+                .collect { chunk ->
+                    if (ttftMs < 0) ttftMs = (System.nanoTime() - started) / 1_000_000
+                    full.append(chunk)
+                    newlines += chunk.count { it == '\n' }
+                }
         } catch (e: CancellationException) {
             // You typed again and the platform cancelled us. Normal and healthy --
             // but it MUST be rethrown. Swallowing a CancellationException breaks
