@@ -42,12 +42,13 @@ Each is documented in full below, with the run that produced it.
   mutation: delete the one line that closes the socket, watch it go red —
   [details](#tests).
 
-- **Telemetry that paid for itself the first time it ran.** Ten minutes of real
-  editing gave an accept rate of 25% over 12 suggestions -- far too small a
-  sample to quote as a property of the plugin, and labelled as such. What it did
-  produce was a finding: 83% of suggestions were hitting the line cap, meaning
-  the model generated 128 tokens so that four lines could be shown. Real p50
-  total was 1567ms where the benchmark said 210ms. Fixed, 4.9x --
+- **Telemetry that found two bugs the benchmarks could not.** Session one: 83%
+  of suggestions were being cut off at the line cap, which put real p50 total at
+  1567ms where the benchmark said 210ms, and left broken Python that disabled the
+  IDE's own indent-on-Enter. Session two: Ollama's log showed request durations
+  climbing 2.4s to 7.2s across one burst, because cancellation was waiting on a
+  socket read that a queue had made slow. Neither is visible from the code, and
+  neither showed up in a benchmark --
   [details](#telemetry-and-what-it-has-not-yet-told-us).
 
 All four came from measuring something rather than reasoning about it, and the
@@ -442,41 +443,61 @@ It records the **shape** of your code, never the content. No prompt text, no
 completion text, no source. Nothing is uploaded. `bench/accept_rate.py` summarises
 the file.
 
-### What one real session said
+### What real sessions said
 
-One person, ten minutes, writing Python in the sandbox. `bench/accept_rate.py`
-over the resulting file:
+Three sessions in the sandbox by one person, each a few minutes of ordinary
+Python. Sessions 2 and 3 each follow a fix that the previous session's telemetry
+had exposed, so this is the log of a feedback loop, not three samples of one
+thing. `bench/accept_rate.py` over the raw files, which are kept in
+`bench/sessions/`:
 
-| | |
-|---|---|
-| suggestions shown | 12 |
-| accepted | 3 |
-| **accept rate** | **25.0%** |
-| stayed silent | 7 (36.8% of opportunities) |
-| hit the line cap | 10 of 12 (83.3%) |
+| | 1 | 2 | 3 |
+|---|---|---|---|
+| suggestions shown | 12 | 27 | 25 |
+| **accept rate** | **25.0%** | **55.6%** | **64.0%** |
+| hit the line cap | 83.3% | 33.3% | 32.0% |
+| stalls over 1s | 6 of 12 | 6 of 25 | 3 of 23 |
+| worst TTFT | 4952ms | 4952ms | 2260ms |
+| TTFT p50, excluding stalls | -- | 176ms | 62ms |
+| total p50, excluding stalls | -- | 638ms | 461ms |
 
-**n = 12. That is one session by the author, not an evaluation**, and it is far
-too small to quote as a property of the plugin. It is reported because it is
-real, and because of what it found.
+**n is 12, 27 and 25, by the author.** That is not an evaluation and the trend is
+not evidence that the plugin got 2.5x better at writing code. Read it as what it
+is: a record of three bugs being found and fixed, where the accept rate is the
+least reliable column and the line-cap and stall columns are the ones that
+actually moved for mechanical reasons.
 
-Dismissals were almost all `INVALIDATED` -- the user kept typing rather than
-pressing Escape. That is the ordinary way a suggestion dies, and counting it as
-a rejection is the right call: a suggestion you typed past is one you did not
-want. It is also how hosted completion products measure themselves, so the
-number is at least the same *kind* of number.
+What each session found:
 
-The 83% line-cap figure is the one that mattered. It meant the model was
-generating 128 tokens and having all but four lines thrown away, which is what
-made p50 *total* 1567ms in real use against 210ms on the bench -- and since
-nothing renders until the last token, total is the number a user feels. The
-bench had missed it entirely, because synthetic caret positions let the model
-stop early and real editing positions did not. Fixed by cancelling the stream
-once enough lines have arrived: p50 927ms -> 189ms, p95 1636ms -> 273ms.
+1. 83% of suggestions were being cut off at the line cap, which made real p50
+   total 1567ms against a benchmark's 210ms. It also left incomplete Python in
+   the file, which broke the IDE's own indent-on-Enter -- a bug that looked like
+   an editor problem and was ours.
+2. Requests were queueing: Ollama's log showed durations climbing 2.4s to 7.2s
+   across one burst of typing, because cancellation waited for a socket read
+   that a queue had made slow. See [tests](#tests) for why the existing
+   cancellation test could not have caught it.
+3. No cascade left. Three stalls remain, all of them two requests overlapping
+   rather than a pile-up.
 
-So the honest summary of this section is that the accept rate is still not
-measured to any standard worth quoting, but the telemetry that would measure it
-has already paid for itself by finding a 5x latency regression that neither the
-benchmark nor manual use surfaced.
+### What these numbers do not capture
+
+**An accepted suggestion that is then partly deleted still counts as a full
+accept.** `onInsert` writes the record the moment Tab is pressed, and nothing
+revisits it afterwards. So this is an *acceptance* rate, not a *retention* rate.
+
+The distinction matters more than the gap in the numbers suggests. Accepting
+four lines and immediately rewriting two of them is a much weaker endorsement
+than accepting four and leaving them, and for training data the two should not
+carry equal weight. Measuring it means watching the accepted range for a while
+after insertion and recording how much of it survives -- a range marker and a
+document listener, not a redesign. It is the first thing I would add.
+
+Dismissals are also not all equal, and the record keeps the platform's
+`FinishType` so they can be told apart later: `ESCAPE_PRESSED` is a deliberate
+rejection, `INVALIDATED` means the user typed straight past it, and
+`EDITOR_REMOVED` says almost nothing at all. Nothing downstream uses that
+distinction yet.
 
 ---
 
