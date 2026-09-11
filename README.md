@@ -159,12 +159,36 @@ In likelihood order:
 Settings live at **Settings → Tools → Inline FIM** -- model, token and line caps,
 debounce, and every silence rule as an individual toggle.
 
-### A note on `buildPlugin` on Windows
+### Platform: this was built and measured only on Windows
 
-Close the sandbox IDE first. `prepareSandbox` rewrites the sandbox plugin
-directory, and a running IDE holds memory-mapped handles on the jars inside it,
-which fails as *"cannot be performed on a file with a user-mapped section open"*.
-It is a file lock, not a build problem.
+Everything here -- every number, every run of every script, every session in the
+sandbox -- is Windows 11 on one laptop. Nothing in the plugin is Windows-specific
+and the Gradle build is the JetBrains template's, so macOS and Linux should be
+unremarkable, but *should* is the operative word: **it has not been run on
+either**, and this README will not imply otherwise.
+
+Three things a reader on another platform should know:
+
+- **`./gradlew` vs `gradlew.bat`.** The commands above use the POSIX wrapper.
+  On Windows `cmd`/PowerShell, use `gradlew.bat`, or just run the `Run Plugin`
+  configuration from inside the IDE.
+- **`buildPlugin` needs the sandbox IDE closed, on Windows.** `prepareSandbox`
+  rewrites the sandbox plugin directory, and a running IDE holds memory-mapped
+  handles on the jars inside it, which fails as *"cannot be performed on a file
+  with a user-mapped section open"*. It is a file lock, not a build problem.
+  Unix lets you replace an open file, so this should not arise there -- untested.
+- **The `127.0.0.1` decision was forced by Windows**, where `localhost` resolves
+  to `::1` first and Ollama binds IPv4 only, costing ~2s per connection. The
+  [story is below](#the-two-seconds-that-were-not-the-models-fault). Using the
+  literal address is harmless everywhere, so the fix is not platform-specific
+  even though the bug was -- but a Linux reader should know that number was not
+  measured on their machine.
+
+The hardware matters too, and more than the OS does. Every latency figure in
+this README is an RTX 4060 Laptop with the model resident in VRAM. On a
+CPU-only machine prefill would dominate, and the context-window reasoning in
+[context assembly](#context-assembly) would deserve revisiting rather than
+being carried over.
 
 ---
 
@@ -720,8 +744,9 @@ Ordered by how much they should change your reading of the numbers above.
 - **The 4-line cap is a guess.** Well-motivated by the logs, but 4 was never
   tested against 2 or 8. The telemetry could answer it and has not been asked.
 - **String detection is a heuristic**, not a real language strategy.
-- **Single-machine numbers.** One GPU laptop throughout. The context-window
-  reasoning would change materially on CPU-only hardware.
+- **Single-machine, single-platform numbers.** One Windows laptop with an RTX
+  4060 throughout. The plugin has never been run on macOS or Linux, and the
+  context-window reasoning would change materially on CPU-only hardware.
 - **No manual-trigger shortcut.** The platform supports `ManualCall`; not wired.
 - **`verifyPlugin` has never been run to completion** here -- it times out
   downloading an IDE to verify against. `buildPlugin` and
