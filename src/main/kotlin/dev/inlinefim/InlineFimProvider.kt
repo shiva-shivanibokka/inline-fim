@@ -65,24 +65,24 @@ class InlineFimProvider : DebouncedInlineCompletionProvider() {
 
         val ctx = decision.ctx
 
-        cachedCompletion(ctx)?.let { cached ->
-            if (cached.isBlank()) return InlineCompletionSuggestion.Empty
+        cachedCompletion(ctx, settings.model, settings.maxLines)?.let { cached ->
+            if (cached.text.isBlank()) return InlineCompletionSuggestion.Empty
             Telemetry.suggestionShown(
                 SuggestionRecord(
                     model = settings.model,
                     language = decision.language,
                     prefixChars = ctx.prefix.length,
                     suffixChars = ctx.suffix.length,
-                    suggestionChars = cached.length,
-                    suggestionLines = cached.count { it == '\n' } + 1,
+                    suggestionChars = cached.text.length,
+                    suggestionLines = cached.text.count { it == '\n' } + 1,
                     ttftMs = 0,
                     totalMs = 0,
                     cached = true,
-                    truncated = false,
+                    truncated = cached.truncated,
                 )
             )
             return InlineCompletionSingleSuggestion.build {
-                emit(InlineCompletionGrayTextElement(cached))
+                emit(InlineCompletionGrayTextElement(cached.text))
             }
         }
 
@@ -142,12 +142,12 @@ class InlineFimProvider : DebouncedInlineCompletionProvider() {
         // The model can see the suffix, and sometimes decides the likeliest
         // continuation IS the suffix. Accepting that gives you the line twice.
         if (settings.silenceEchoOfSuffix && isEchoOfSuffix(trimmed, ctx.suffix)) {
-            cacheCompletion(ctx, "")
+            cacheCompletion(ctx, settings.model, settings.maxLines, CachedCompletion("", false))
             Telemetry.silent(SilenceReason.ECHO_OF_SUFFIX, decision.language)
             return InlineCompletionSuggestion.Empty
         }
 
-        cacheCompletion(ctx, trimmed)
+        cacheCompletion(ctx, settings.model, settings.maxLines, CachedCompletion(trimmed, truncated))
         if (trimmed.isBlank()) return InlineCompletionSuggestion.Empty
 
         thisLogger().info(

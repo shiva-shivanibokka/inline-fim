@@ -1,6 +1,7 @@
 package dev.inlinefim
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -60,5 +61,43 @@ class FimContextTest {
     fun `fim prompt uses qwen special tokens in PSM order`() {
         val p = fimPrompt(FimContext("BEFORE", "AFTER"))
         assertEquals("<|fim_prefix|>BEFORE<|fim_suffix|>AFTER<|fim_middle|>", p)
+    }
+
+    // -- cache -------------------------------------------------------------
+    //
+    // The cache key is the part that is easy to get wrong and impossible to
+    // notice: keying on context alone serves the old model's completions after
+    // you change the model in Settings, which looks like the setting being
+    // ignored rather than like a cache bug.
+
+    @Test
+    fun `changing the model does not serve the previous model's completion`() {
+        clearCompletionCache()
+        val ctx = FimContext("def f():\n    ", "\n")
+        cacheCompletion(ctx, "model-a", 4, CachedCompletion("return 1", false))
+
+        assertEquals("return 1", cachedCompletion(ctx, "model-a", 4)?.text)
+        assertNull("a different model must miss", cachedCompletion(ctx, "model-b", 4))
+    }
+
+    @Test
+    fun `changing the line cap does not serve the previous cap's completion`() {
+        clearCompletionCache()
+        val ctx = FimContext("def f():\n    ", "\n")
+        cacheCompletion(ctx, "model-a", 4, CachedCompletion("a\nb\nc\nd", true))
+
+        assertNull("a different line cap must miss", cachedCompletion(ctx, "model-a", 2))
+    }
+
+    @Test
+    fun `a cache hit reports whether the completion was truncated`() {
+        // Reported in telemetry, and the line-cap rate is a number this project
+        // draws conclusions from. A cache hit that always said false would
+        // silently understate it.
+        clearCompletionCache()
+        val ctx = FimContext("x", "y")
+        cacheCompletion(ctx, "m", 4, CachedCompletion("a\nb", true))
+
+        assertEquals(true, cachedCompletion(ctx, "m", 4)?.truncated)
     }
 }

@@ -110,17 +110,39 @@ private val STOP_TOKENS = listOf(
 
 private const val CACHE_ENTRIES = 256
 
-private val cache: MutableMap<FimContext, String> = Collections.synchronizedMap(
-    object : LinkedHashMap<FimContext, String>(CACHE_ENTRIES, 0.75f, true) {
-        override fun removeEldestEntry(eldest: Map.Entry<FimContext, String>): Boolean = size > CACHE_ENTRIES
+/**
+ * The context alone is NOT a sufficient key. A completion is a function of the
+ * settings that produced it too: switch the model, or change the line cap, and
+ * the right answer for the same caret position changes. Keying on context alone
+ * meant changing either in Settings kept serving the old model's suggestions
+ * until the entry aged out, which looks exactly like the setting not working.
+ */
+private data class CacheKey(val ctx: FimContext, val model: String, val maxLines: Int)
+
+/**
+ * The trimmed text, plus whether trimming actually cut anything. The flag has to
+ * live here: telemetry reports it, and a cache hit that reported `truncated =
+ * false` unconditionally would quietly understate how often the line cap binds --
+ * a number this project draws conclusions from.
+ */
+data class CachedCompletion(val text: String, val truncated: Boolean)
+
+private val cache: MutableMap<CacheKey, CachedCompletion> = Collections.synchronizedMap(
+    object : LinkedHashMap<CacheKey, CachedCompletion>(CACHE_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: Map.Entry<CacheKey, CachedCompletion>): Boolean =
+            size > CACHE_ENTRIES
     }
 )
 
-fun cachedCompletion(ctx: FimContext): String? = cache[ctx]
+fun cachedCompletion(ctx: FimContext, model: String, maxLines: Int): CachedCompletion? =
+    cache[CacheKey(ctx, model, maxLines)]
 
-fun cacheCompletion(ctx: FimContext, text: String) {
-    cache[ctx] = text
+fun cacheCompletion(ctx: FimContext, model: String, maxLines: Int, completion: CachedCompletion) {
+    cache[CacheKey(ctx, model, maxLines)] = completion
 }
+
+/** Test seam: the LRU is process-wide, so tests must be able to start from empty. */
+fun clearCompletionCache() = cache.clear()
 
 // ---------------------------------------------------------------------------
 // Ollama client

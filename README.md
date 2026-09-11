@@ -49,7 +49,7 @@ Each is documented in full below, with the run that produced it.
   climbing 2.4s to 7.2s across one burst, because cancellation was waiting on a
   socket read that a queue had made slow. Neither is visible from the code, and
   neither showed up in a benchmark --
-  [details](#telemetry-and-what-it-has-not-yet-told-us).
+  [details](#telemetry-and-what-it-found).
 
 All four came from measuring something rather than reasoning about it, and the
 fourth is the sharpest of them: the benchmark that missed the latency regression
@@ -71,7 +71,7 @@ Then:
 
 ```bash
 ./gradlew runIde        # opens a sandbox IDE with the plugin loaded
-./gradlew test          # 24 tests, no Ollama needed
+./gradlew test          # 27 tests, no Ollama needed
 ./gradlew buildPlugin   # -> build/distributions/inline-fim-0.1.0.zip
 ```
 
@@ -132,7 +132,7 @@ IntelliJ InlineCompletionProvider          (the platform calls us)
   └─ telemetry                             one JSON record per suggestion
 ```
 
-Six source files, 917 lines including the commentary, plus 396 lines of tests
+Six source files, 939 lines including the commentary, plus 435 lines of tests
 and 671 lines of measurement harness.
 
 **No third-party runtime dependencies.** `HttpClient` is JDK 21; Gson and
@@ -213,7 +213,7 @@ to fill the display cap, since nothing after that can change what is shown:
 
 Measured over 14 caret positions in a realistic Python file. 4.9x at p50, and
 p95 total lands inside the 300ms budget rather than five times outside it. The
-story is in [telemetry](#telemetry-and-what-it-has-not-yet-told-us).
+story is in [telemetry](#telemetry-and-what-it-found).
 
 ### The two seconds that were not the model's fault
 
@@ -345,7 +345,7 @@ So the honest summary is that the binding constraint is latency, the quality gap
 to a much larger model is narrower here than it would be on a reasoning task,
 and the gap that does remain is better closed with task-specific training data
 than with parameters. Which is the argument for collecting the accept/reject
-signal in the first place -- see [telemetry](#telemetry-and-what-it-has-not-yet-told-us).
+signal in the first place -- see [telemetry](#telemetry-and-what-it-found).
 
 ---
 
@@ -356,7 +356,7 @@ reconstruct it, and compares against what the author actually wrote. Prefix ends
 at the caret and suffix starts at the *next* line, so the model cannot see the
 answer.
 
-80 cases over this repo's own Kotlin and Python:
+80 cases over this repo's own Kotlin:
 
 | | |
 |---|---|
@@ -447,7 +447,7 @@ something unusual. Marked as such in the code.
 
 ---
 
-## Telemetry, and what it has not yet told us
+## Telemetry, and what it found
 
 Every suggestion appends one JSON object to
 `inline-fim/suggestions.jsonl` in the IDE log directory. The record shape, with
@@ -483,10 +483,10 @@ thing. `bench/accept_rate.py` over the raw files, which are kept in
 | suggestions shown | 12 | 27 | 25 |
 | **accept rate** | **25.0%** | **55.6%** | **64.0%** |
 | hit the line cap | 83.3% | 33.3% | 32.0% |
-| stalls over 1s | 6 of 12 | 6 of 25 | 3 of 23 |
-| worst TTFT | 4952ms | 4952ms | 2260ms |
-| TTFT p50, excluding stalls | -- | 176ms | 62ms |
-| total p50, excluding stalls | -- | 638ms | 461ms |
+| stalls over 1s | 2 of 12 | 6 of 25 | 3 of 23 |
+| worst TTFT | 4689ms | 4952ms | **2260ms** |
+| TTFT p50, excluding stalls | 46ms | 176ms | **62ms** |
+| total p50, excluding stalls | 1567ms | 638ms | **461ms** |
 
 **n is 12, 27 and 25, by the author.** That is not an evaluation and the trend is
 not evidence that the plugin got 2.5x better at writing code. Read it as what it
@@ -530,7 +530,7 @@ distinction yet.
 
 ## Tests
 
-24, all runnable offline without Ollama.
+27, all runnable offline without Ollama.
 
 Two of them are about cancellation, and the history of those two is the most
 useful thing in this section.
@@ -565,6 +565,15 @@ simply broken.
 
 The lesson I would keep: a test that cannot fail is not a weak test, it is
 decoration, and both of these looked completely reasonable while proving nothing.
+
+**Three of the 27 came from a read-through rather than a failure.** The
+completion cache was keyed on the context alone, so changing the model or the
+line cap in Settings kept serving the previous setting's answers until the entry
+aged out -- which presents as the setting being ignored, not as a cache bug.
+A cache hit also reported `truncated = false` unconditionally, quietly
+understating the line-cap rate that this README draws conclusions from. Both are
+fixed, keyed now on context plus model plus cap, and mutation-verified the same
+way: collapse the key back and two of the three go red.
 
 ---
 
