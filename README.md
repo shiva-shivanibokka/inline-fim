@@ -61,29 +61,110 @@ telemetry from someone actually typing caught it.
 
 ## Running it
 
-**Requires** JDK 21, and [Ollama](https://ollama.com) with a FIM-capable model:
+### 1. Prerequisites
+
+**JDK 21.** Anything newer will not work -- the IntelliJ Platform Gradle plugin
+targets 21. If `java -version` disagrees with what Gradle uses, set `JAVA_HOME`
+explicitly.
+
+**[Ollama](https://ollama.com)**, installed *and running*. On macOS and Windows
+the desktop app starts a background server; on Linux, `ollama serve`.
+
+### 2. Get the model
 
 ```bash
 ollama pull qwen2.5-coder:1.5b-base     # ~1 GB
 ```
 
-Then:
+The `-base` suffix is not optional. `-instruct` variants are chat-tuned and will
+write prose into your buffer; only the base models were trained with the
+fill-in-the-middle objective. See [below](#why-fill-in-the-middle-not-chat).
+
+### 3. Check it before launching the IDE
+
+**Do this.** This plugin stays silent when it is unsure -- that is the point of
+it -- so a broken setup and a cautious plugin look identical from the editor. Two
+seconds here saves you wondering whether it works:
 
 ```bash
-./gradlew runIde        # opens a sandbox IDE with the plugin loaded
-./gradlew test          # 27 tests, no Ollama needed
+ollama list                             # qwen2.5-coder:1.5b-base should appear
+curl http://127.0.0.1:11434/api/tags    # should return JSON, not "connection refused"
+```
+
+If you want to confirm fill-in-the-middle itself works before involving an IDE at
+all:
+
+```bash
+curl -s http://127.0.0.1:11434/api/generate -d '{
+  "model":"qwen2.5-coder:1.5b-base",
+  "prompt":"<|fim_prefix|>def add(a, b):
+    return <|fim_suffix|>
+<|fim_middle|>",
+  "raw":true, "stream":false, "options":{"num_predict":16}
+}'
+```
+
+The `response` field should begin `a + b`. If it comes back as prose, or with
+markdown fences, you are on an `-instruct` tag.
+
+### 4. Run it
+
+```bash
+git clone https://github.com/shiva-shivanibokka/inline-fim
+cd inline-fim
+
+./gradlew runIde        # sandbox IDE with the plugin loaded
+./gradlew test          # 27 tests, no Ollama needed, no network
 ./gradlew buildPlugin   # -> build/distributions/inline-fim-0.1.0.zip
 ```
 
-On Windows, close the sandbox IDE before running `buildPlugin`. `prepareSandbox`
-rewrites the sandbox plugin directory, and a running IDE holds memory-mapped
-handles on the jars in it, which fails as *"cannot be performed on a file with a
-user-mapped section open"*. It is a file lock, not a build problem.
+On Windows use `gradlew.bat`, or run the `Run Plugin` configuration from the IDE.
 
-Settings live at **Settings → Tools → Inline FIM** — model, token and line caps,
+`runIde` takes a few minutes the first time -- it downloads IntelliJ IDEA
+Community 2025.2.6.2 and the Python plugin. Subsequent runs are seconds.
+
+### 5. See it work
+
+In the sandbox IDE that opens:
+
+1. Open or create a folder, and a **`.py` file** in it.
+2. Type something ordinary and pause:
+   ```python
+   def running_total(nums):
+       total = 0
+       for n in nums:
+   ```
+3. Grey text appears ahead of the caret. **Tab** accepts it, **Esc** dismisses it.
+
+The **first** suggestion of a session may take ~4.5s if Ollama has not loaded the
+model yet; after that it is tens of milliseconds. A warm-up request fires when a
+project opens to hide most of that.
+
+### If no grey text appears
+
+In likelihood order:
+
+- **Ollama is not running.** Step 3. This is the overwhelmingly common cause, and
+  it is invisible from the editor by design.
+- **You are somewhere the plugin deliberately stays quiet** -- mid-word, inside a
+  string or comment, or on a line that is already complete. Try pressing Enter
+  for a fresh blank line inside a function body. The full list is
+  [here](#when-it-deliberately-says-nothing).
+- **You did not pause.** There is a 200ms debounce; typing continuously cancels
+  each request before it can be shown.
+- **Still nothing:** `Help → Show Log in Explorer/Finder` in the sandbox IDE and
+  grep for `inline-fim`. Every request logs its timings, every silence logs its
+  reason, and a failed warm-up logs why.
+
+Settings live at **Settings → Tools → Inline FIM** -- model, token and line caps,
 debounce, and every silence rule as an individual toggle.
 
-The `-base` suffix on the model is not optional. See below.
+### A note on `buildPlugin` on Windows
+
+Close the sandbox IDE first. `prepareSandbox` rewrites the sandbox plugin
+directory, and a running IDE holds memory-mapped handles on the jars inside it,
+which fails as *"cannot be performed on a file with a user-mapped section open"*.
+It is a file lock, not a build problem.
 
 ---
 
