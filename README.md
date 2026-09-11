@@ -42,15 +42,19 @@ Each is documented in full below, with the run that produced it.
   mutation: delete the one line that closes the socket, watch it go red —
   [details](#tests).
 
-- **A README that says "not measured" where nothing was measured.** Human accept
-  rate is the number this project would most like to report, and the one number
-  here that is not real. The pipeline is built and verified; the figure needs a
-  human using the plugin. It is left blank rather than filled in —
+- **Telemetry that paid for itself the first time it ran.** Ten minutes of real
+  editing gave an accept rate of 25% over 12 suggestions -- far too small a
+  sample to quote as a property of the plugin, and labelled as such. What it did
+  produce was a finding: 83% of suggestions were hitting the line cap, meaning
+  the model generated 128 tokens so that four lines could be shown. Real p50
+  total was 1567ms where the benchmark said 210ms. Fixed, 4.9x --
   [details](#telemetry-and-what-it-has-not-yet-told-us).
 
-Three of those four are things that neither reading the code nor using the
-plugin would have surfaced. They came from measurement. The fourth is what the
-same discipline costs when the measurement is not available.
+All four came from measuring something rather than reasoning about it, and the
+fourth is the sharpest of them: the benchmark that missed the latency regression
+was honest, repeatable, and measuring the wrong situation. Synthetic caret
+positions let the model stop early; real editing positions did not. Only
+telemetry from someone actually typing caught it.
 
 ---
 
@@ -189,6 +193,25 @@ through the same context window and FIM format the plugin uses.
 
 Run-to-run variance is real: a later run of the same configuration gave a p50 of
 85ms. Read these as tens of milliseconds, not precise figures.
+
+**Total is the number that matters, and this table understates it.** Nothing is
+rendered until the whole completion has arrived, so time-to-first-token is an
+internal measure -- the user waits for total. Worse, the 210ms above is a
+benchmark artefact: synthetic caret positions let the model stop generating
+early, and real editing positions did not. Telemetry from an actual session put
+p50 total at 1567ms.
+
+That is fixed. The stream is now cancelled as soon as enough lines have arrived
+to fill the display cap, since nothing after that can change what is shown:
+
+| | p50 | p95 |
+|---|---|---|
+| read every token | 927ms | 1636ms |
+| **stop at the line cap** | **189ms** | **273ms** |
+
+Measured over 14 caret positions in a realistic Python file. 4.9x at p50, and
+p95 total lands inside the 300ms budget rather than five times outside it. The
+story is in [telemetry](#telemetry-and-what-it-has-not-yet-told-us).
 
 ### The two seconds that were not the model's fault
 
@@ -419,10 +442,41 @@ It records the **shape** of your code, never the content. No prompt text, no
 completion text, no source. Nothing is uploaded. `bench/accept_rate.py` summarises
 the file.
 
-**The human accept rate is not measured yet.** The pipeline is implemented and
-verified, but the number requires sustained real use by a person, and I would
-rather ship an empty column than a fabricated one. The offline proxy above is the
-closest honest substitute, and it measures something different.
+### What one real session said
+
+One person, ten minutes, writing Python in the sandbox. `bench/accept_rate.py`
+over the resulting file:
+
+| | |
+|---|---|
+| suggestions shown | 12 |
+| accepted | 3 |
+| **accept rate** | **25.0%** |
+| stayed silent | 7 (36.8% of opportunities) |
+| hit the line cap | 10 of 12 (83.3%) |
+
+**n = 12. That is one session by the author, not an evaluation**, and it is far
+too small to quote as a property of the plugin. It is reported because it is
+real, and because of what it found.
+
+Dismissals were almost all `INVALIDATED` -- the user kept typing rather than
+pressing Escape. That is the ordinary way a suggestion dies, and counting it as
+a rejection is the right call: a suggestion you typed past is one you did not
+want. It is also how hosted completion products measure themselves, so the
+number is at least the same *kind* of number.
+
+The 83% line-cap figure is the one that mattered. It meant the model was
+generating 128 tokens and having all but four lines thrown away, which is what
+made p50 *total* 1567ms in real use against 210ms on the bench -- and since
+nothing renders until the last token, total is the number a user feels. The
+bench had missed it entirely, because synthetic caret positions let the model
+stop early and real editing positions did not. Fixed by cancelling the stream
+once enough lines have arrived: p50 927ms -> 189ms, p95 1636ms -> 273ms.
+
+So the honest summary of this section is that the accept rate is still not
+measured to any standard worth quoting, but the telemetry that would measure it
+has already paid for itself by finding a 5x latency regression that neither the
+benchmark nor manual use surfaced.
 
 ---
 
