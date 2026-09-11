@@ -130,4 +130,72 @@ class CancellationTest {
             server.stop(0)
         }
     }
+
+    @Test
+    fun `cancellation does not wait for the next token to arrive`() = runBlocking {
+        // The regression test for the bug real telemetry found.
+        //
+        // The test above streams a token every 25ms, so "aborts within one token"
+        // and "aborts immediately" are indistinguishable -- it passed happily
+        // while cancellation was in fact blocked inside a socket read until the
+        // next token showed up.
+        //
+        // That mattered in production. Under a burst of typing, each keystroke
+        // abandons a request; if the abandoned request keeps generating, the next
+        // one queues behind it, the next token therefore arrives later, and the
+        // next cancellation is delayed further still. Ollama logged the loop as
+        // request durations climbing 2.4s -> 7.2s across one burst.
+        //
+        // So this stub sends two tokens fast and then stalls for a long time,
+        // reproducing a queued server. Cancellation must not wait out the stall.
+        val stallMs = 5_000L
+        val closedEarly = AtomicBoolean(false)
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/generate") { exchange ->
+            exchange.sendResponseHeaders(200, 0)
+            try {
+                exchange.responseBody.use { out ->
+                    repeat(2) { i ->
+                        out.write("""{"response":"tok$i ","done":false}""".toByteArray())
+                        out.write('\n'.code)
+                        out.flush()
+                    }
+                    Thread.sleep(stallMs)          // the queued-server stall
+                    out.write("""{"response":"late","done":true}""".toByteArray())
+                    out.write('\n'.code)
+                }
+            } catch (e: IOException) {
+                closedEarly.set(true)
+            }
+        }
+        server.executor = Executors.newSingleThreadExecutor()
+        server.start()
+
+        try {
+            val url = "http://127.0.0.1:${server.address.port}/api/generate"
+            val received = AtomicInteger()
+            val job = launch(Dispatchers.IO) {
+                OllamaFim.stream("prompt", url = url).collect { received.incrementAndGet() }
+            }
+
+            withTimeout(5_000) { while (received.get() < 2) delay(5) }
+
+            // We are now parked in a read that will not return for `stallMs`.
+            val startedCancelling = System.nanoTime()
+            job.cancelAndJoin()
+            val cancelMs = (System.nanoTime() - startedCancelling) / 1_000_000
+
+            // The whole point. Blocking until the next token would put this at
+            // ~stallMs; a prompt abort is milliseconds. The threshold sits far
+            // from both so it is not a timing-flake test.
+            assertTrue(
+                "cancelling took ${cancelMs}ms, i.e. it waited for the stalled " +
+                    "token instead of aborting the read",
+                cancelMs < stallMs / 5,
+            )
+        } finally {
+            server.stop(0)
+        }
+    }
 }

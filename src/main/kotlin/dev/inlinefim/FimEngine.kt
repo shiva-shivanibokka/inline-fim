@@ -4,11 +4,13 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.job
 import kotlinx.coroutines.future.await
 import java.net.URI
 import java.net.http.HttpClient
@@ -182,31 +184,73 @@ object OllamaFim {
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
             .build()
 
-        // ofLines() completes as soon as the response headers land, then yields
-        // body lines lazily as they arrive. That laziness is what gives us a real
-        // first-token moment instead of one lump at the end.
-        val resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofLines()).await()
+        // ofInputStream() completes as soon as the response headers land, then
+        // yields body bytes lazily as they arrive. That laziness is what gives us
+        // a real first-token moment instead of one lump at the end.
+        //
+        // Deliberately NOT ofLines(), which is the obvious choice and hands you a
+        // Stream<String> for free. Its stream is backed by a BufferedReader, and
+        // BufferedReader synchronises close() on the same lock readLine() holds --
+        // so closing it from another thread to abort a stalled read blocks behind
+        // the very read it is trying to interrupt. Measured at 4987ms against a
+        // 5000ms stall: it waits the whole thing out.
+        //
+        // The JDK's response InputStream is built for this instead: close() cancels
+        // the subscription and pushes a sentinel so a blocked reader wakes up.
+        val resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofInputStream()).await()
         if (resp.statusCode() != 200) return@flow
 
-        val lines = resp.body()
+        val body = resp.body()
+
+        // hasNext() blocks on the socket between tokens, so a cancelled coroutine
+        // would sit inside it until the next token arrived before reaching the
+        // finally below. That used to be invisible at ~15ms per token, and this
+        // comment used to say so.
+        //
+        // It stopped being invisible. Under a burst of typing, each keystroke
+        // abandons a request and starts another; if the abandoned one keeps
+        // generating, the new one queues behind it, which makes the next token
+        // arrive later, which delays the next cancellation further. Ollama's log
+        // caught the feedback loop as request durations climbing 2.4s -> 7.2s
+        // across a single burst, all of them overlapping.
+        //
+        // invokeOnCompletion fires the instant the coroutine is cancelled, on
+        // whatever thread cancelled it, so closing the body here unblocks the
+        // read immediately instead of one token later.
+        // Close the RAW stream, never the reader wrapped around it below -- that
+        // is the whole point of the handler change above.
+        // onCancelling = true is the entire fix. The default fires when the job
+        // COMPLETES, and a cancelled job does not complete until the code inside
+        // it unwinds -- which here means until the stalled read returns. The
+        // handler would run right after the thing it was meant to interrupt.
+        // onCancelling fires the moment cancellation begins instead.
+        @OptIn(InternalCoroutinesApi::class)
+        val closer = currentCoroutineContext().job.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true,
+        ) { runCatching { body.close() } }
         try {
-            val iter = lines.iterator()
-            // ponytail: hasNext() blocks between tokens, so cancellation lands on
-            // the next token boundary rather than instantly. At ~15ms/token that is
-            // invisible, and the 10s request timeout bounds the worst case. Switch
-            // to BodyHandlers.ofPublisher if it ever stops being invisible.
-            while (iter.hasNext()) {
+            val reader = body.bufferedReader()
+            while (true) {
                 currentCoroutineContext().ensureActive()
-                val line = iter.next()
+                val line = reader.readLine() ?: break
                 if (line.isBlank()) continue
                 val obj = JsonParser.parseString(line).asJsonObject
                 obj.get("response")?.asString?.takeIf { it.isNotEmpty() }?.let { emit(it) }
                 if (obj.get("done")?.asBoolean == true) break
             }
+        } catch (e: Exception) {
+            // Closing the body under a blocked read surfaces as an IO error rather
+            // than a cancellation. If we were in fact cancelled, report that --
+            // otherwise callers log a scary warning for something we did on purpose.
+            currentCoroutineContext().ensureActive()
+            throw e
         } finally {
-            // Closing here is what actually aborts the socket on cancellation.
+            closer.dispose()
+            // Still closed here for the ordinary paths: completion, and the
+            // takeWhile in the provider aborting once it has enough lines.
             // CancellationTest fails if this line is removed -- verified, not assumed.
-            lines.close()
+            runCatching { body.close() }
         }
     }.flowOn(Dispatchers.IO)
 }
