@@ -383,6 +383,32 @@ correctness, not the metric.
 
 ---
 
+### The same eval on Python
+
+The plugin is used on Python; the numbers above are its own Kotlin. That is a
+mismatch worth closing, so the same harness was pointed at CPython's standard
+library -- `json`, `email`, `http`, `csv`, `dataclasses`:
+
+| corpus | n | exact | prefix | nonempty |
+|---|---|---|---|---|
+| this project's Kotlin | 80 | 40.0% | 45.0% | -- |
+| CPython stdlib | 120 | **54.2%** | 58.3% | 100% |
+
+**Do not read that gap as "better at Python".** CPython's standard library is
+almost certainly in Qwen2.5-Coder's training data, and this project's Kotlin was
+written days ago and certainly is not. Some part of 54.2% is recall rather than
+inference, and this eval cannot separate the two.
+
+That makes the pair more useful than either number alone. 40% is a floor on
+genuinely unseen code; 54% is what it looks like on code the model may have
+memorised. The honest claim is that real performance sits between them, nearer
+the bottom for a private codebase and nearer the top for ordinary library-heavy
+code. Measuring it properly needs a corpus with a known cutoff date -- repositories
+published after the model's training cut, which is the standard fix for
+contamination and is not something a weekend project should claim to have done.
+
+---
+
 ## When it deliberately says nothing
 
 A tool that suggests constantly gets switched off. Silence is a feature.
